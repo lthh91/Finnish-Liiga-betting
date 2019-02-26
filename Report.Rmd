@@ -1,0 +1,382 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+Sport Betting Presentation
+========================================================
+author: Group 6
+date: 
+autosize: true
+
+
+```{r}
+install.packages('dplyr')
+install.packages('dummies')
+install.packages('lpSolveAPI')
+```
+
+
+a) Model relative strengths of the teams
+========================================================
+
+```{r}
+library(dplyr)
+df <- read.csv('RegularSeasonData.csv', fileEncoding = 'latin1')
+teams = sort(unique(df$home))
+df_ot = df %>% filter(ot==1)
+
+df<- df%>% mutate(h = ifelse(ot==1,pmin(h,v),h), v = ifelse(ot==1,pmin(h,v),v))
+
+df1 = df %>% select(home, visitor, h) %>% rename(Attacker = home, Defender = visitor, Goals = h) %>% mutate(Home = 1)
+df2 = df %>% select(home, visitor, v) %>% rename(Attacker = visitor, Defender = home, Goals = v) %>% mutate(Home = 0)
+data = df1 %>% rbind(df2)
+library(dummies)
+data2 = dummy.data.frame(data,names = c("Attacker","Defender"), sep="_")
+glm_model = glm(data=data2, formula = Goals ~ -1+., family = poisson())
+```
+
+```{r}
+glm_model
+```
+
+
+Since the Defender_TPS coefficient is currently NA, we re-regress the model without this parameter. The result is as followed:
+
+```{r}
+glm_fixed = glm(data=data2, formula = Goals ~ -1+.-Defender_TPS, family=poisson())
+glm_fixed$coefficients
+```
+
+```{r}
+string = ""
+for (i in (1:15)){
+  string = cat(string,as.character(teams[i]),'&')
+  string = cat(string,glm_fixed$coefficients[i],'&',glm_fixed$coefficients[i+15],'& \\')
+}
+```
+
+
+After getting the coefficients vector, we add back TPS_Defender = 0 to this vector.
+```{r}
+coefs = glm_fixed$coefficients
+coefs = c(coefs[1:29],0,coefs[30])
+coefs = matrix(coefs)
+```
+
+b) Predict number of goals scored by teams
+=========================================================
+Test case:
+```{r}
+home_team = "HIFK"
+away_team = "SaiPa"
+```
+
+Function to predict goals scored by each team:
+```{r}
+predict_goals = function(home_team, away_team){
+  home_id = which(teams==home_team)
+  away_id = which(teams==away_team)
+  new_match = matrix(rep(0,62),ncol=31)
+  new_match[1,home_id] = 1
+  new_match[1,away_id+15] = 1
+  new_match[1,31] = 1
+  new_match[2,away_id] = 1
+  new_match[2,home_id+15] = 1
+  predicted_goals = exp(new_match%*%coefs)
+  return(predicted_goals)
+}
+```
+
+```{r}
+predicted_goals = predict_goals(home_team,away_team)
+sprintf("Predict number of goals scored by Home team: %f", predicted_goals[1])
+sprintf("Predict number of goals scored by Visiting team: %f", predicted_goals[2])
+```
+c)Estimate winning probabilities of individual games
+====================================================
+```{r}
+home_team = "HIFK"
+away_team = "Ilves"
+```
+
+Use Monte Carlo simulation to attain 1000000 simulations of goals scored by each team, then compare them element-wise. The playoff variable in the function tells if the result accepts draw (playoff=True - no draws)
+
+```{r}
+match_result = function(home_team, away_team, n_simu = 1000000, playoff=T){
+  p_goals = predict_goals(home_team,away_team)
+  hgoals = rpois(n_simu, p_goals[1])
+  vgoals = rpois(n_simu, p_goals[2])
+  hwin = sum(hgoals>vgoals)/n_simu
+  vwin = sum(hgoals<vgoals)/n_simu
+  if (playoff){
+    wplayoff = hwin+vwin
+    hwin = hwin/wplayoff
+    vwin = vwin/wplayoff
+    return(c(hwin,vwin,0))
+  }
+  draw = sum(hgoals==vgoals)/n_simu
+  return(c(hwin,vwin,draw))
+}
+```
+
+```{r}
+p_result = match_result(home_team, away_team, playoff = F)
+sprintf("Home team has %d%% chance to win", round(p_result[1]*100))
+sprintf("Away team has %d%% chance to win", round(p_result[2]*100))
+sprintf("Chance that the match draws is %d%%", round(p_result[3]*100))
+```
+
+d)Likelihood of different outcomes for the entire playoff bracket
+=================================================================
+Generate winner for one set of playoff matches (best of 7). The teams take turns to be the host, and the result of the games are simulated accordingly. If one game is drew, then it is simulated again until there is a winner.
+```{r}
+best_of_seven = function(high_team,low_team){
+  pgoals = cbind(predict_goals(high_team,low_team),rev(predict_goals(low_team, high_team)))
+  high_wins = 0
+  low_wins = 0
+  i = 1
+  while (high_wins<4 & low_wins<4) {
+    g1 = 0
+    g2 = 0
+    while (g1 == g2){
+      g1 = rpois(1,pgoals[1,i])
+      g2 = rpois(1,pgoals[2,i])
+    }
+    if (g1>g2){
+      high_wins = high_wins + 1
+    } else {
+      low_wins = low_wins + 1
+    }
+    i = i + 1
+    if (i == 3) {i=1}
+  }
+  if (high_wins >=4) {
+    return(high_team)
+  } else {
+    return(low_team)
+  }
+}
+```
+
+```{r}
+print(best_of_seven(home_team,away_team))
+```
+
+Function the_champion generate from a list of 8 teams a champion:
+```{r}
+the_champion = function(teams){
+  q1_winner = best_of_seven(teams[1],teams[2])
+  q2_winner = best_of_seven(teams[3],teams[4])
+  q3_winner = best_of_seven(teams[5],teams[6])
+  q4_winner = best_of_seven(teams[7],teams[8])
+  s1_winner = best_of_seven(q1_winner,q4_winner)
+  s2_winner = best_of_seven(q2_winner,q3_winner)
+  champion = best_of_seven(s1_winner,s2_winner)
+  return(champion)
+}
+```
+
+
+Simulating 1000000 times to attain chances of each team to be the winner:
+```{r}
+final_teams = teams[c(8,1,15,12,14,7,6,2)]
+scores = rep(0,8)
+n_simu = 1000000
+for (i in (1:n_simu)){
+  new_champion = the_champion(final_teams)
+  champ_index = which(final_teams==new_champion)
+  temp = scores[champ_index] + 1
+  scores[champ_index] = temp
+}
+chances = scores/n_simu
+
+for (i in (1:8)){
+  print(paste("Team ",final_teams[i]," has ",chances[i]*100,"% chance of winning the title."))
+}
+```
+```{r}
+string = ""
+for (i in (1:8)){
+  string = cat(string, as.character(final_teams[i]), '&', chances[i]*100, '//')
+}
+```
+
+```{r}
+x = data.frame(teams = final_teams,chances = chances)
+write.csv(x,'chances.csv')
+```
+e)Solve the allocation of a 1000 euros budget
+================================================
+
+Using the chances calculated above and the betting odds, getting optimal allocation of budget using lpSolveAPI
+```{r}
+betting_odds = read.csv('BettingOdds.csv')
+bet_odds = c()
+for (team in final_teams){
+  odd = betting_odds[which(betting_odds$Team==team),2]
+  bet_odds = c(bet_odds,odd)
+}
+budget = 1000
+max_porp = 0.5
+nteam = length(final_teams)
+A = matrix(0,nrow=nteam,ncol=nteam)
+for (i in (1:nteam)){
+  A[i,i] = 1
+}
+A = rbind(rep(1,nteam),A)
+b = c(budget,rep(max_porp*budget,nteam))
+f = chances*bet_odds
+library(lpSolveAPI)
+lp = make.lp(nrow(A),ncol(A))
+for (c in (1:ncol(A))){
+  set.column(lp, c, A[,c])
+}
+set.constr.type(lp,rep("<=",nteam+1))
+set.rhs(lp,b)
+set.objfn(lp,f)
+lp.control(lp,sense='max')
+solve(lp)
+OptimalSolution <- get.variables(lp)
+maxValue = get.objective(lp)
+```
+
+```{r}
+cat("The maximum expected value of the bet is ",maxValue,"\n")
+for (i in (1:nteam)){
+  print(paste("Bet", OptimalSolution[i],"euros on team",final_teams[i]))
+}
+```
+
+f)Another allocation
+======================================
+We feel that 50% is still a way too big number, so we limit the maximum proportion on each team to 25%.
+```{r}
+max_porp = 0.25
+A = matrix(0,nrow=nteam,ncol=nteam)
+for (i in (1:nteam)){
+  A[i,i] = 1
+}
+A = rbind(rep(1,nteam),A)
+b = c(budget,rep(max_porp*budget,nteam))
+f = chances*bet_odds
+library(lpSolveAPI)
+lp = make.lp(nrow(A),ncol(A))
+for (c in (1:ncol(A))){
+  set.column(lp, c, A[,c])
+}
+set.constr.type(lp,rep("<=",nteam+1))
+set.rhs(lp,b)
+set.objfn(lp,f)
+lp.control(lp,sense='max')
+solve(lp)
+OptimalSolution <- get.variables(lp)
+maxValue = get.objective(lp)
+```
+
+```{r}
+cat("The maximum expected value of the bet is ",maxValue,"\n")
+for (i in (1:nteam)){
+  print(paste("Bet", OptimalSolution[i],"euros on team",final_teams[i]))
+}
+```
+
+g)
+==================================
+```{r}
+library(dplyr)
+df.new <- read.csv('RegularSeasonData.csv', fileEncoding = 'latin1')
+teams = sort(unique(df.new$home))
+
+df.new<- df.new%>% mutate(h = ifelse(ot==1,pmin(h,v),h), v = ifelse(ot==1,pmin(h,v),v))
+
+df.new1 = df.new %>% select(home, visitor, h) %>% rename(Attacker = home, Defender = visitor, Goals = h) %>% mutate(Home = Attacker)
+df.new2 = df.new %>% select(home, visitor, v) %>% rename(Attacker = visitor, Defender = home, Goals = v) %>% mutate(Home = "N/A")
+data.new = df.new1 %>% rbind(df.new2)
+library(dummies)
+data.new = dummy.data.frame(data.new,names = c("Attacker","Defender","Home"), sep="_")
+data.new = data.new[-47]
+new_glm_model = glm(data=data.new, formula = Goals ~ -1+.-Defender_TPS, family = poisson())
+new_glm_model
+```
+
+```{r}
+coefs2 = new_glm_model$coefficients
+coefs2 = c(coefs2[1:29],0,coefs2[30:44])
+coefs2 = matrix(coefs2)
+```
+
+```{r}
+predict_goals = function(home_team, away_team){
+  home_id = which(teams==home_team)
+  away_id = which(teams==away_team)
+  new_match = matrix(rep(0,90),ncol=45)
+  new_match[1,home_id] = 1
+  new_match[1,away_id+15] = 1
+  new_match[1,home_id+30] = 1
+  new_match[2,away_id] = 1
+  new_match[2,home_id+15] = 1
+  predicted_goals = exp(new_match%*%coefs2)
+  return(predicted_goals)
+}
+```
+
+
+```{r}
+final_teams = teams[c(8,1,15,12,14,7,6,2)]
+scores = rep(0,8)
+n_simu = 1000000
+for (i in (1:n_simu)){
+  new_champion = the_champion(final_teams)
+  champ_index = which(final_teams==new_champion)
+  temp = scores[champ_index] + 1
+  scores[champ_index] = temp
+}
+chances = scores/n_simu
+for (i in (1:8)){
+  print(paste("Team ",final_teams[i]," has ",chances[i]*100,"% chance of winning the title."))
+}
+```
+
+```{r}
+string = ""
+for (i in (1:8)){
+  string = cat(string, as.character(final_teams[i]), '&', chances[i]*100, '//')
+}
+```
+
+```{r}
+x = data.frame(teams = final_teams,chances = chances)
+write.csv(x = x,file = 'chances2.csv')
+```
+
+```{r}
+max_porp = 0.5
+A = matrix(0,nrow=nteam,ncol=nteam)
+for (i in (1:nteam)){
+  A[i,i] = 1
+}
+A = rbind(rep(1,nteam),A)
+b = c(budget,rep(max_porp*budget,nteam))
+f = chances*bet_odds
+library(lpSolveAPI)
+lp = make.lp(nrow(A),ncol(A))
+for (c in (1:ncol(A))){
+  set.column(lp, c, A[,c])
+}
+set.constr.type(lp,rep("<=",nteam+1))
+set.rhs(lp,b)
+set.objfn(lp,f)
+lp.control(lp,sense='max')
+solve(lp)
+OptimalSolution <- get.variables(lp)
+maxValue = get.objective(lp)
+```
+
+```{r}
+cat("The maximum expected value of the bet is ",maxValue,"\n")
+for (i in (1:nteam)){
+  print(paste("Bet", OptimalSolution[i],"euros on team",final_teams[i]))
+}
+```
+
